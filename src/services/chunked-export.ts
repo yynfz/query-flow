@@ -1,5 +1,6 @@
 import { serializeWorkbook, downloadWorkbook, type QueryResult } from "./excel";
 import type { SqlChunkResponse } from "../types";
+import { RateLimiter, sleep } from "./rate-limiter";
 
 export const MAX_EXPORT_BYTES = 20 * 1024 * 1024;
 export const EXPORT_CHECKPOINT_ROWS = 250_000;
@@ -75,14 +76,34 @@ export class ChunkedExport {
   }
 }
 
-/** Retry size failures at the same offset; advance only after a chunk is accepted. */
+export function isRateLimitError(message: string): boolean {
+  return /429|too many requests|rate limit|quota exceeded|30 per 1 minute/i.test(message);
+}
+
+export function getRateLimitCooldownSeconds(retryCount: number): number {
+  if (retryCount <= 1) return 20;
+  if (retryCount === 2) return 35;
+  return 60;
+}
+
+export interface CollectQueryOptions {
+  startRow?: number;
+  maxRows?: number;
+  onColumns?: (columns: string[]) => void;
+  rateLimiter?: RateLimiter;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  maxRateLimitRetries?: number;
+  getCooldownSeconds?: (retryCount: number) => number;
+}
+
+/** Retry size failures at the same offset; advance only after a chunk is accepted. Paces requests and retries 429. */
 export async function collectQuery(
   request: (offset: number, limit: number, iteration: number) => Promise<SqlChunkResponse>,
   accept: (columns: string[], rows: unknown[][]) => Promise<void>,
   stopped: () => boolean,
   report: (message: string) => void,
   signal?: AbortSignal,
-  options: { startRow?: number; maxRows?: number; onColumns?: (columns: string[]) => void } = {},
+  options: CollectQueryOptions = {},
 ): Promise<void> {
   const parsedStartRow = Number(options.startRow);
   let offset = Number.isFinite(parsedStartRow) && parsedStartRow >= 1 ? Math.floor(parsedStartRow) - 1 : 0;
@@ -91,7 +112,21 @@ export async function collectQuery(
   let collectedRows = 0;
   let limit = Math.min(9000, maxRows ?? 9000);
   let iteration = 1;
+  let isContinuation = false;
+  let rateLimitRetries = 0;
+  const maxRateLimitRetries = options.maxRateLimitRetries ?? 5;
+  const sleeper = options.sleep ?? sleep;
+  const getCooldown = options.getCooldownSeconds ?? getRateLimitCooldownSeconds;
+
   while (!stopped()) {
+    if (signal?.aborted) break;
+
+    // Acquire rate limit slot for new SQL queries (not continuation from memory cursor)
+    if (!isContinuation && options.rateLimiter) {
+      await options.rateLimiter.acquire(report, signal);
+      if (stopped() || signal?.aborted) break;
+    }
+
     let response: SqlChunkResponse;
     try {
       const pending = request(offset, limit, iteration);
@@ -113,15 +148,41 @@ export async function collectQuery(
     } catch (error) {
       response = { ok: false, message: error instanceof Error ? error.message : "Koneksi SQL Lab terputus." };
     }
+
     if (!response.ok) {
-      if (stopped()) break;
+      if (stopped() || signal?.aborted) break;
+
+      // Handle 429 Too Many Requests (Rate limiting from Superset / DB engine)
+      if (isRateLimitError(response.message)) {
+        if (rateLimitRetries >= maxRateLimitRetries) {
+          throw new Error(`Batas percobaan ulang rate limit tercapai (${maxRateLimitRetries}x). ${response.message}`);
+        }
+        rateLimitRetries++;
+        options.rateLimiter?.reset();
+        const cooldownSec = getCooldown(rateLimitRetries);
+        for (let sec = cooldownSec; sec > 0; sec--) {
+          if (stopped() || signal?.aborted) break;
+          report(`Rate limit 429 tercapai (30/menit). Menunggu cooldown ${sec}s sebelum mencoba lagi (percobaan ${rateLimitRetries}/${maxRateLimitRetries})…`);
+          await sleeper(1000, signal);
+        }
+        if (stopped() || signal?.aborted) break;
+        report(`Mencoba ulang dari baris ${offset + 1} setelah cooldown rate limit…`);
+        continue;
+      }
+
+      // Handle payload size limits
       if (limit > 1 && /exceed|too (?:large|big)|size.{0,30}limit|limit.{0,30}(?:size|bytes|mb)|payload|out of memory/i.test(response.message)) {
         limit = Math.max(1, Math.floor(limit / 2));
         report(`Batas ukuran tercapai. Mengulang dari baris ${offset + 1} dengan chunk ${limit} baris…`);
         continue;
       }
+
       throw new Error(response.message);
     }
+
+    // Reset rate limit retry count upon any successful response
+    rateLimitRetries = 0;
+
     options.onColumns?.(response.columns);
     // A chunk that finished concurrently with Stop is still valid and exported.
     if (response.rows.length || offset === 0) await accept(response.columns, response.rows);
@@ -129,9 +190,11 @@ export async function collectQuery(
     if (stopped()) break;
     if (maxRows !== undefined && collectedRows >= maxRows) return;
     if (response.continuation) {
+      isContinuation = true;
       iteration++;
       continue;
     }
+    isContinuation = false;
     if (!response.hasMore) return;
     if (!response.rows.length) throw new Error("Chunk kosong tetapi hasil belum selesai; proses dihentikan agar tidak mengulang tanpa akhir.");
     offset += response.pageSize ?? limit;

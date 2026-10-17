@@ -1,10 +1,16 @@
 import "./style.css";
 import packageJson from "../../package.json";
 import { ChunkedExport, collectQuery, EXPORT_CHECKPOINT_ROWS } from "../services/chunked-export";
+import { RateLimiter } from "../services/rate-limiter";
 import { SplitChunkedExport, validateSplitColumnInputs, type FolderExportOutput } from "../services/split-export";
 import { applyWilayahConfig, extractSqlTitle } from "../services/sql";
 
 let folderRunning = false;
+const sessionRateLimiter = new RateLimiter({
+  maxRequests: 25,
+  windowMs: 60_000,
+  minIntervalMs: 1000,
+});
 import { loadFolderConfigs, loadSnapshot, loadWilayah, saveFolderConfigs, saveSnapshot, saveWilayah, type StoredFolderConfig } from "../services/storage";
 import { groupSqlFiles, isSqlPath } from "../services/repository-sync/files";
 import { addWilayahCode, validateWilayah } from "../services/wilayah";
@@ -90,6 +96,7 @@ app.innerHTML = `
             <li><strong>Stop</strong> atau error tetap mengunduh hasil yang sudah terkumpul sebagai Excel parsial.</li>
             <li>Opsi folder: atur baris awal (offset), batas total baris, dan pilih query yang ingin dijalankan.</li>
             <li><strong>Run Folder</strong> tetap mengunduh Excel parsial jika terjadi error atau dihentikan di tengah proses.</li>
+            <li><strong>Anti Rate-Limit (429):</strong> Kecepatan query otomatis dipace (&le;25 query/menit) dan otomatis cooldown/retry jika server membatasi 30 query/menit, sehingga folder besar (89+ query) selesai tanpa terputus.</li>
           </ul>
         </div>
       </details>
@@ -558,11 +565,12 @@ function renderGroups(): void {
               },
               (columns, rows) => output.append({ filename: file.path, title: extractSqlTitle(file.content, file.name), columns, rows }),
               () => batchStopRequested,
-              (message) => { batchStatus.textContent = message; },
+              (message) => { batchStatus.textContent = `${index + 1}/${filesToRun.length}: ${file.name} — ${message}`; },
               batchController.signal,
               {
                 startRow,
                 maxRows,
+                rateLimiter: sessionRateLimiter,
                 onColumns: (columns) => {
                   if (output instanceof SplitChunkedExport) output.validateHeaders(file.path, columns);
                 },
@@ -702,7 +710,7 @@ function renderGroups(): void {
             () => stopRequested,
             (message) => { status.textContent = message; },
             controller.signal,
-            { startRow, maxRows },
+            { startRow, maxRows, rateLimiter: sessionRateLimiter },
           );
           await output.flush(true);
           status.textContent = `Selesai: ${output.totalRows.toLocaleString("id-ID")} baris · ${output.parts} file Excel diunduh.`;

@@ -197,4 +197,47 @@ describe("automatic chunk collection", () => {
     await expect(collectQuery(request, vi.fn(), () => false, vi.fn())).rejects.toThrow("Payload too large");
     expect(request.mock.calls.length).toBeLessThan(16);
   });
+
+  it("retries on 429 Too Many Requests error and resumes upon success", async () => {
+    const sleep = vi.fn(async () => {});
+    const report = vi.fn();
+    const accept = vi.fn(async () => {});
+    const request = vi.fn<(...args: number[]) => Promise<SqlChunkResponse>>()
+      .mockResolvedValueOnce({
+        ok: false,
+        message: "DB engine Error\n429 Too Many Requests: 30 per 1 minute\nThis may be triggered by: Issue 1011",
+      })
+      .mockResolvedValueOnce(chunk([[100]], false, false, 9000));
+
+    await collectQuery(request, accept, () => false, report, undefined, {
+      sleep,
+      getCooldownSeconds: () => 2,
+    });
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(2); // 2 seconds countdown
+    expect(report).toHaveBeenCalledWith(expect.stringContaining("Rate limit 429 tercapai"));
+    expect(accept).toHaveBeenCalledWith(["id"], [[100]]);
+  });
+
+  it("stops immediately if aborted during 429 rate limit cooldown", async () => {
+    const controller = new AbortController();
+    const sleep = vi.fn(async () => {
+      controller.abort();
+    });
+    const request = vi.fn(async () => ({
+      ok: false as const,
+      message: "429 Too Many Requests: 30 per 1 minute",
+    }));
+
+    await expect(
+      collectQuery(request, vi.fn(), () => controller.signal.aborted, vi.fn(), controller.signal, {
+        sleep,
+        getCooldownSeconds: () => 10,
+      }),
+    ).rejects.toThrow("dihentikan");
+
+    expect(request).toHaveBeenCalledTimes(1);
+  });
 });
+
