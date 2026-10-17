@@ -4,6 +4,8 @@ import { ChunkedExport, collectQuery, EXPORT_CHECKPOINT_ROWS } from "../services
 import { RateLimiter } from "../services/rate-limiter";
 import { SplitChunkedExport, validateSplitColumnInputs, type FolderExportOutput } from "../services/split-export";
 import { applyWilayahConfig, extractSqlTitle } from "../services/sql";
+import { buildFileManagementPlan, isValidManagementDate, type FileManagementPlan } from "../services/file-management";
+import { executeFileManagementPlan, scanDirectory } from "../services/file-system";
 
 let folderRunning = false;
 const sessionRateLimiter = new RateLimiter({
@@ -21,6 +23,11 @@ let wilayah: WilayahConfig = { level1: [], level2: [] };
 let folderConfigs: Record<string, StoredFolderConfig> = {};
 let progress: SyncProgress = { phase: "idle", message: "Not synced" };
 let wilayahError = "";
+let managementRoot: FileSystemDirectoryHandle | null = null;
+let managementPlan: FileManagementPlan | null = null;
+let managementBusy = false;
+let managementMessage = "Pilih folder Tim 34 untuk memulai. Preview tidak mengubah file.";
+let managementError = false;
 const runProgressTargets = new Map<string, (progress: SqlRunProgress) => void>();
 
 function isContextInvalidated(error: unknown): boolean {
@@ -103,6 +110,39 @@ app.innerHTML = `
       <div id="empty-groups" class="empty-state">Import folder SQL untuk melihat daftar query dan menjalankannya di FASIH SQL Lab.</div>
       <div id="groups" class="groups"></div>
     </section>
+    <section class="section file-management-section" aria-labelledby="file-management-title">
+      <div class="section-heading"><span>04</span><h2 id="file-management-title">Kelola File Excel Tim 34</h2></div>
+      <p class="management-intro">Distribusikan output harian ke folder kabupaten/kota. Selalu preview dahulu; file tujuan tidak pernah ditimpa.</p>
+      <div class="management-card">
+        <div class="management-field">
+          <label for="management-date">Tanggal output</label>
+          <input id="management-date" type="date" />
+        </div>
+        <div class="management-actions">
+          <button id="select-management-folder" class="secondary-button" type="button">Pilih Folder Tim 34</button>
+          <button id="preview-management" class="secondary-button" type="button" disabled>Pindai &amp; Preview</button>
+        </div>
+        <p id="management-folder" class="management-folder">Belum ada folder dipilih</p>
+        <p id="management-status" class="management-status" aria-live="polite"></p>
+        <div id="management-preview" class="management-preview" hidden>
+          <div id="management-stats" class="management-stats"></div>
+          <details open>
+            <summary>Rencana pemindahan</summary>
+            <div id="management-moves" class="management-list"></div>
+          </details>
+          <details id="management-issues-section">
+            <summary id="management-issues-title">File dilewati</summary>
+            <div id="management-issues" class="management-list"></div>
+          </details>
+          <details id="management-partials-section">
+            <summary id="management-partials-title">File _partial</summary>
+            <div id="management-partials" class="management-list"></div>
+          </details>
+          <button id="execute-management" class="primary-button management-execute" type="button">Jalankan Rencana</button>
+          <p class="management-warning">File sumber baru dihapus setelah salinan tujuan selesai dan ukuran file terverifikasi.</p>
+        </div>
+      </div>
+    </section>
     <footer class="author-credit">Initiated by D. Agung Sungkono</footer>
   </main>
   <dialog id="preview-dialog">
@@ -122,6 +162,17 @@ const importButton = byId<HTMLButtonElement>("import-folder");
 const folderInput = byId<HTMLInputElement>("folder-input");
 const newLevel1Input = byId<HTMLInputElement>("new-level1");
 const newLevel2Input = byId<HTMLInputElement>("new-level2");
+const managementDateInput = byId<HTMLInputElement>("management-date");
+const selectManagementFolderButton = byId<HTMLButtonElement>("select-management-folder");
+const previewManagementButton = byId<HTMLButtonElement>("preview-management");
+const executeManagementButton = byId<HTMLButtonElement>("execute-management");
+
+function localIsoDate(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+managementDateInput.value = localIsoDate();
 
 async function initialize(): Promise<void> {
   [snapshot, wilayah, folderConfigs] = await Promise.all([loadSnapshot(), loadWilayah(), loadFolderConfigs()]);
@@ -135,6 +186,170 @@ function render(): void {
   renderSource();
   renderWilayah();
   renderGroups();
+  renderFileManagement();
+}
+
+function renderManagementList(elementId: string, rows: string[], emptyMessage: string): void {
+  const element = byId(elementId);
+  element.replaceChildren();
+  if (rows.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "management-empty";
+    empty.textContent = emptyMessage;
+    element.append(empty);
+    return;
+  }
+  const visibleRows = rows.slice(0, 100);
+  for (const value of visibleRows) {
+    const row = document.createElement("div");
+    row.className = "management-list-row";
+    row.textContent = value;
+    element.append(row);
+  }
+  if (rows.length > visibleRows.length) {
+    const more = document.createElement("p");
+    more.className = "management-more";
+    more.textContent = `+ ${rows.length - visibleRows.length} item lainnya`;
+    element.append(more);
+  }
+}
+
+function renderFileManagement(): void {
+  byId("management-folder").textContent = managementRoot ? `Folder: ${managementRoot.name}` : "Belum ada folder dipilih";
+  const status = byId("management-status");
+  status.textContent = managementMessage;
+  status.classList.toggle("is-error", managementError);
+  selectManagementFolderButton.disabled = managementBusy;
+  previewManagementButton.disabled = managementBusy || !managementRoot;
+  managementDateInput.disabled = managementBusy;
+  const preview = byId("management-preview");
+  preview.hidden = !managementPlan;
+  if (!managementPlan) return;
+
+  const renamed = managementPlan.operations.filter((operation) => operation.renamed).length;
+  byId("management-stats").innerHTML = `
+    <span><strong>${managementPlan.operations.length}</strong> file dipindah</span>
+    <span><strong>${managementPlan.dateDirectories.length}</strong> folder dibuat</span>
+    <span><strong>${renamed}</strong> nama disesuaikan</span>
+    <span><strong>${managementPlan.issues.length}</strong> dilewati</span>
+  `;
+  renderManagementList(
+    "management-moves",
+    managementPlan.operations.map((operation) => `${operation.sourcePath}\n→ ${operation.destinationDirectory}/${operation.destinationName}`),
+    "Tidak ada file Excel yang perlu dipindahkan.",
+  );
+  renderManagementList(
+    "management-issues",
+    managementPlan.issues.map((issue) => `${issue.path}\n— ${issue.message}`),
+    "Tidak ada file yang dilewati.",
+  );
+  renderManagementList("management-partials", managementPlan.partialFiles, "Tidak ditemukan file Excel _partial.");
+  byId("management-issues-title").textContent = `File dilewati (${managementPlan.issues.length})`;
+  byId("management-partials-title").textContent = `File _partial (${managementPlan.partialFiles.length})`;
+  byId<HTMLDetailsElement>("management-issues-section").open = managementPlan.issues.length > 0;
+  executeManagementButton.disabled = managementBusy || managementPlan.operations.length + managementPlan.dateDirectories.length === 0;
+  executeManagementButton.textContent = managementBusy ? "Memproses…" : "Jalankan Rencana";
+}
+
+type DirectoryPickerWindow = Window & {
+  showDirectoryPicker?: (options?: { id?: string; mode?: "read" | "readwrite" }) => Promise<FileSystemDirectoryHandle>;
+};
+
+type PermissionDirectoryHandle = FileSystemDirectoryHandle & {
+  queryPermission?(options: { mode: "readwrite" }): Promise<PermissionState>;
+  requestPermission?(options: { mode: "readwrite" }): Promise<PermissionState>;
+};
+
+async function selectManagementFolder(): Promise<void> {
+  const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
+  if (!picker) {
+    managementError = true;
+    managementMessage = "Browser ini tidak mendukung akses folder. Gunakan Chrome desktop versi terbaru.";
+    renderFileManagement();
+    return;
+  }
+  try {
+    managementRoot = await picker.call(window, { id: "queryflow-tim34", mode: "readwrite" });
+    managementPlan = null;
+    managementError = false;
+    managementMessage = "Folder dipilih. Klik Pindai & Preview; tahap ini belum mengubah file.";
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === "AbortError")) {
+      managementError = true;
+      managementMessage = error instanceof Error ? error.message : "Folder tidak dapat dibuka.";
+    }
+  }
+  renderFileManagement();
+}
+
+async function previewFileManagement(): Promise<void> {
+  if (!managementRoot) return;
+  const date = managementDateInput.value;
+  if (!isValidManagementDate(date)) {
+    managementError = true;
+    managementMessage = "Pilih tanggal output yang valid.";
+    renderFileManagement();
+    return;
+  }
+  managementBusy = true;
+  managementPlan = null;
+  managementError = false;
+  managementMessage = "Memindai struktur folder dan file Excel…";
+  renderFileManagement();
+  try {
+    const directorySnapshot = await scanDirectory(managementRoot);
+    managementPlan = buildFileManagementPlan(directorySnapshot, date);
+    managementMessage = `Preview siap: ${managementPlan.operations.length} file akan dipindahkan. Periksa rincian sebelum menjalankan.`;
+  } catch (error) {
+    managementError = true;
+    managementMessage = error instanceof Error ? error.message : "Folder gagal dipindai.";
+  } finally {
+    managementBusy = false;
+    renderFileManagement();
+  }
+}
+
+async function executeManagement(): Promise<void> {
+  if (!managementRoot || !managementPlan) return;
+  const actionCount = managementPlan.operations.length + managementPlan.dateDirectories.length;
+  if (actionCount === 0) return;
+  const confirmed = window.confirm(
+    `Jalankan rencana untuk ${managementPlan.date}?\n\n${managementPlan.operations.length} file akan dipindahkan dan ${managementPlan.dateDirectories.length} folder akan dibuat. File sumber dihapus setelah salinan terverifikasi.`,
+  );
+  if (!confirmed) return;
+
+  const permissionHandle = managementRoot as PermissionDirectoryHandle;
+  managementBusy = true;
+  managementError = false;
+  managementMessage = "Memeriksa izin tulis folder…";
+  renderFileManagement();
+  try {
+    const currentPermission = await permissionHandle.queryPermission?.({ mode: "readwrite" }) ?? "prompt";
+    if (currentPermission !== "granted") {
+      const requestedPermission = await permissionHandle.requestPermission?.({ mode: "readwrite" });
+      if (requestedPermission !== "granted") throw new Error("Izin tulis folder tidak diberikan.");
+    }
+    managementMessage = "Menyiapkan folder tujuan…";
+    renderFileManagement();
+    const result = await executeFileManagementPlan(managementRoot, managementPlan, (completed, total, operation) => {
+      managementMessage = operation
+        ? `Memindahkan ${completed} / ${total}: ${operation.destinationName}`
+        : `Memindahkan 0 / ${total} file…`;
+      renderFileManagement();
+    });
+    const snapshotAfter = await scanDirectory(managementRoot);
+    managementPlan = buildFileManagementPlan(snapshotAfter, managementDateInput.value);
+    managementError = result.failures.length > 0;
+    managementMessage = result.failures.length > 0
+      ? `${result.completed} file selesai; ${result.failures.length} gagal dan sumbernya dipertahankan. ${result.failures[0]?.operation.sourcePath}: ${result.failures[0]?.message}`
+      : `${result.completed} file berhasil dipindahkan dengan aman.`;
+  } catch (error) {
+    managementError = true;
+    managementMessage = error instanceof Error ? error.message : "Rencana gagal dijalankan.";
+  } finally {
+    managementBusy = false;
+    renderFileManagement();
+  }
 }
 
 function renderSource(): void {
@@ -869,6 +1084,17 @@ syncButton?.addEventListener("click", async () => {
 
 importButton.addEventListener("click", () => folderInput.click());
 folderInput.addEventListener("change", () => void importRepositoryFolder(folderInput.files));
+selectManagementFolderButton.addEventListener("click", () => void selectManagementFolder());
+previewManagementButton.addEventListener("click", () => void previewFileManagement());
+executeManagementButton.addEventListener("click", () => void executeManagement());
+managementDateInput.addEventListener("change", () => {
+  managementPlan = null;
+  managementError = false;
+  managementMessage = managementRoot
+    ? "Tanggal berubah. Pindai ulang untuk membuat preview baru."
+    : "Pilih folder Tim 34 untuk memulai. Preview tidak mengubah file.";
+  renderFileManagement();
+});
 
 async function importRepositoryFolder(fileList: FileList | null): Promise<void> {
   if (!fileList?.length) return;

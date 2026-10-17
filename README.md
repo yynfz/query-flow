@@ -80,6 +80,18 @@ Di setiap folder, aktifkan **Advanced settings** untuk mengatur:
 
 Pengaturan disimpan per folder. Nilai default biasanya cukup untuk penggunaan biasa.
 
+## Kelola File Excel Tim 34
+
+Bagian **Kelola File Excel Tim 34** di side panel mengubah skrip Terminal pada rencana Tim 34 menjadi alur yang dapat diperiksa sebelum dijalankan:
+
+1. Pilih tanggal output dan folder induk `Tim 34`.
+2. Klik **Pindai & Preview** untuk melihat folder yang akan dibuat, file yang akan dipindahkan, penyesuaian nama, file yang dilewati, dan temuan `_partial`.
+3. Periksa preview, lalu klik **Jalankan Rencana** dan konfirmasi.
+
+File `.xlsx` di dalam folder tanggal didistribusikan menurut kode kabupaten/kota 4 digit pada nama file. Nama yang bentrok diberi akhiran `_2`, `_3`, dan seterusnya, tanpa menimpa file yang sudah ada. Output RantabDBNAS hanya diberi nama deskriptif jika folder sumber menunjukkan query yang dikenali; run dengan folder generik dilewati agar tidak salah label.
+
+Saat menjalankan rencana, QueryFlow menyalin file ke tujuan dan memverifikasi ukurannya sebelum menghapus sumber. Jika struktur folder berubah setelah preview, operasi terkait dihentikan dan pengguna diminta memindai ulang.
+
 ## Instalasi untuk Development
 
 Perlu Node.js 20.19+ atau 22.12+.
@@ -100,6 +112,12 @@ Di Chrome, buka `chrome://extensions`, aktifkan **Developer mode**, pilih **Load
 - Versi ini ditujukan untuk FASIH SQL Lab. Perubahan pada aplikasi FASIH/Superset dapat memengaruhi kompatibilitas.
 
 ## Changelog
+
+### 0.4.0
+
+- Tambah UI preview dan eksekusi untuk membuat folder tanggal serta mendistribusikan output Excel Tim 34.
+- Tambah proteksi duplikat tanpa overwrite, penamaan RantabDBNAS berdasarkan folder query, dan deteksi file `_partial`.
+- Verifikasi hasil salinan sebelum file sumber dihapus; file ambigu atau tujuan yang berubah dilewati dengan aman.
 
 ### 0.3.6
 
