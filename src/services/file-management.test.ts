@@ -37,7 +37,7 @@ describe("Tim 34 file management planning", () => {
     expect(plan.partialFiles).toEqual(["65 - KALIMANTAN UTARA/6571 - KOTA TARAKAN/2026-10-17/existing_partial.xlsx"]);
   });
 
-  it("adds known Rantab query names and skips ambiguous runs", () => {
+  it("adds known Rantab query names and routes generic runs without renaming", () => {
     const plan = buildFileManagementPlan({
       directories: [...directories, "2026-10-17/run-unknown"],
       files: [
@@ -48,6 +48,8 @@ describe("Tim 34 file management planning", () => {
     }, "2026-10-17");
 
     expect(plan.operations[0]?.destinationName).toBe("RantabDBNAS_6571_1pf912l_query_jumlah_remark.xlsx");
-    expect(plan.issues.map((issue) => issue.reason)).toEqual(["no-code", "unknown-rantab-query"]);
+    expect(plan.operations[1]?.destinationName).toBe("RantabDBNAS_6571_abc.xlsx");
+    expect(plan.operations[1]?.renamed).toBe(false);
+    expect(plan.issues.map((issue) => issue.reason)).toEqual(["no-code"]);
   });
 });

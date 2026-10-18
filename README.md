@@ -88,7 +88,7 @@ Bagian **Kelola File Excel Tim 34** di side panel mengubah skrip Terminal pada r
 2. Klik **Pindai & Preview** untuk melihat folder yang akan dibuat, file yang akan dipindahkan, penyesuaian nama, file yang dilewati, dan temuan `_partial`.
 3. Periksa preview, lalu klik **Jalankan Rencana** dan konfirmasi.
 
-File `.xlsx` di dalam folder tanggal didistribusikan menurut kode kabupaten/kota 4 digit pada nama file. Nama yang bentrok diberi akhiran `_2`, `_3`, dan seterusnya, tanpa menimpa file yang sudah ada. Output RantabDBNAS hanya diberi nama deskriptif jika folder sumber menunjukkan query yang dikenali; run dengan folder generik dilewati agar tidak salah label.
+File `.xlsx` di dalam folder tanggal didistribusikan menurut kode kabupaten/kota 4 digit pada nama file. Nama yang bentrok diberi akhiran `_2`, `_3`, dan seterusnya, tanpa menimpa file yang sudah ada. Output RantabDBNAS diberi nama deskriptif jika folder sumber menunjukkan query yang dikenali. File dari folder run generik tetap dipindahkan dengan nama aslinya agar tidak salah label.
 
 Saat menjalankan rencana, QueryFlow menyalin file ke tujuan dan memverifikasi ukurannya sebelum menghapus sumber. Jika struktur folder berubah setelah preview, operasi terkait dihentikan dan pengguna diminta memindai ulang.
 
@@ -112,6 +112,10 @@ Di Chrome, buka `chrome://extensions`, aktifkan **Developer mode**, pilih **Load
 - Versi ini ditujukan untuk FASIH SQL Lab. Perubahan pada aplikasi FASIH/Superset dapat memengaruhi kompatibilitas.
 
 ## Changelog
+
+### 0.4.1
+
+- Perbaiki output RantabDBNAS dari folder run generik agar tetap masuk rencana pemindahan dengan nama asli.
 
 ### 0.4.0
 

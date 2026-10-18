@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "QueryFlow",
   "description": "Import dan batch query SQL Lab, ekspor Excel, serta kelola output Tim 34.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "permissions": ["storage", "tabs", "sidePanel", "scripting", "clipboardWrite", "downloads"],
   "host_permissions": ["https://git.bps.go.id/*", "https://fasih-dashboard.bps.go.id/*"],
   "background": {

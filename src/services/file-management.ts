@@ -13,7 +13,7 @@ export interface FileMoveOperation {
 
 export interface FileManagementIssue {
   path: string;
-  reason: "no-code" | "province-not-found" | "regency-not-found" | "unknown-rantab-query";
+  reason: "no-code" | "province-not-found" | "regency-not-found";
   message: string;
 }
 
@@ -54,17 +54,17 @@ function reserveUniqueName(name: string, reserved: Set<string>): string {
   return candidate;
 }
 
-function rantabName(path: string, originalName: string, code: string): { name: string; known: boolean } {
-  if (!originalName.toLowerCase().startsWith("rantabdbnas_")) return { name: originalName, known: true };
+function rantabName(path: string, originalName: string, code: string): string {
+  if (!originalName.toLowerCase().startsWith("rantabdbnas_")) return originalName;
   const sourceFolder = parentPath(path).toLowerCase();
   const suffix = RANTAB_SUFFIXES.find((candidate) => sourceFolder.includes(candidate.toLowerCase()));
-  if (!suffix) return { name: originalName, known: false };
+  if (!suffix) return originalName;
   const stem = originalName.replace(/\.xlsx$/i, "");
-  if (stem.toLowerCase().endsWith(`_${suffix.toLowerCase()}`)) return { name: originalName, known: true };
+  if (stem.toLowerCase().endsWith(`_${suffix.toLowerCase()}`)) return originalName;
   const prefix = new RegExp(`^RantabDBNAS_${code}_`, "i");
-  if (!prefix.test(stem)) return { name: originalName, known: true };
+  if (!prefix.test(stem)) return originalName;
   const randomId = stem.replace(prefix, "");
-  return { name: `RantabDBNAS_${code}_${randomId}_${suffix}.xlsx`, known: true };
+  return `RantabDBNAS_${code}_${randomId}_${suffix}.xlsx`;
 }
 
 export function isValidManagementDate(value: string): boolean {
@@ -121,14 +121,10 @@ export function buildFileManagementPlan(snapshot: DirectorySnapshot, date: strin
       issues.push({ path: sourcePath, reason: "regency-not-found", message: `Folder kabupaten/kota ${code} tidak ditemukan.` });
       continue;
     }
-    const renamed = rantabName(sourcePath, name, code);
-    if (!renamed.known) {
-      issues.push({ path: sourcePath, reason: "unknown-rantab-query", message: "Query RantabDBNAS tidak dapat dikenali dari nama folder; file dilewati." });
-      continue;
-    }
+    const plannedName = rantabName(sourcePath, name, code);
     const destinationDirectory = `${regency}/${date}`;
     const reserved = reservedByDirectory.get(destinationDirectory) ?? new Set<string>();
-    const destinationName = reserveUniqueName(renamed.name, reserved);
+    const destinationName = reserveUniqueName(plannedName, reserved);
     reservedByDirectory.set(destinationDirectory, reserved);
     operations.push({
       sourcePath,
