@@ -4,8 +4,9 @@ import { ChunkedExport, collectQuery, EXPORT_CHECKPOINT_ROWS } from "../services
 import { RateLimiter } from "../services/rate-limiter";
 import { SplitChunkedExport, validateSplitColumnInputs, type FolderExportOutput } from "../services/split-export";
 import { applyWilayahConfig, extractSqlTitle } from "../services/sql";
-import { buildFileManagementPlan, isValidManagementDate, type FileManagementPlan } from "../services/file-management";
-import { executeFileManagementPlan, scanDirectory } from "../services/file-system";
+import { buildFileManagementPlan, isValidManagementDate, type FileManagementPlan, type FileMoveOperation } from "../services/file-management";
+import { executeFileManagementPlan, readFileAtPath, scanDirectory } from "../services/file-system";
+import { TIM34_WEBDAV_URL, WebDavUploader } from "../services/webdav";
 
 let folderRunning = false;
 const sessionRateLimiter = new RateLimiter({
@@ -25,6 +26,7 @@ let progress: SyncProgress = { phase: "idle", message: "Not synced" };
 let wilayahError = "";
 let managementRoot: FileSystemDirectoryHandle | null = null;
 let managementPlan: FileManagementPlan | null = null;
+let managementUploadOperations: FileMoveOperation[] = [];
 let managementBusy = false;
 let managementMessage = "Pilih folder Tim 34 untuk memulai. Preview tidak mengubah file.";
 let managementError = false;
@@ -140,6 +142,8 @@ app.innerHTML = `
           </details>
           <button id="execute-management" class="primary-button management-execute" type="button">Jalankan Rencana</button>
           <p class="management-warning">File sumber baru dihapus setelah salinan tujuan selesai dan ukuran file terverifikasi.</p>
+          <button id="upload-management" class="secondary-button management-upload" type="button">Unggah ke WebDAV</button>
+          <p class="management-webdav-target">Sumber: hasil lokal Kab/Kota · tujuan: transdata-cloud.bps.go.id dengan struktur folder yang sama</p>
         </div>
       </div>
     </section>
@@ -165,6 +169,7 @@ const newLevel2Input = byId<HTMLInputElement>("new-level2");
 const managementDateInput = byId<HTMLInputElement>("management-date");
 const selectManagementFolderButton = byId<HTMLButtonElement>("select-management-folder");
 const previewManagementButton = byId<HTMLButtonElement>("preview-management");
+const uploadManagementButton = byId<HTMLButtonElement>("upload-management");
 const executeManagementButton = byId<HTMLButtonElement>("execute-management");
 
 function localIsoDate(): string {
@@ -247,8 +252,58 @@ function renderFileManagement(): void {
   byId("management-issues-title").textContent = `File dilewati (${managementPlan.issues.length})`;
   byId("management-partials-title").textContent = `File _partial (${managementPlan.partialFiles.length})`;
   byId<HTMLDetailsElement>("management-issues-section").open = managementPlan.issues.length > 0;
+  uploadManagementButton.disabled = managementBusy || managementUploadOperations.length === 0;
+  uploadManagementButton.textContent = managementBusy ? "Memproses…" : "Unggah ke WebDAV";
   executeManagementButton.disabled = managementBusy || managementPlan.operations.length + managementPlan.dateDirectories.length === 0;
   executeManagementButton.textContent = managementBusy ? "Memproses…" : "Jalankan Rencana";
+}
+
+async function uploadManagement(): Promise<void> {
+  if (!managementRoot || managementUploadOperations.length === 0) return;
+  const operations = [...managementUploadOperations];
+  const previewLimit = 10;
+  const previewPaths = operations
+    .slice(0, previewLimit)
+    .map((operation) => `${operation.destinationDirectory}/${operation.destinationName}`);
+  const remaining = operations.length - previewPaths.length;
+  const confirmed = window.confirm(
+    `Preview Unggah ke WebDAV\n\n${operations.length} file akan diunggah dari folder lokal ke path WebDAV berikut:\n\n${previewPaths.join("\n")}${remaining > 0 ? `\n... dan ${remaining} file lainnya` : ""}\n\nLanjutkan unggah?`,
+  );
+  if (!confirmed) return;
+
+  const uploader = new WebDavUploader(TIM34_WEBDAV_URL);
+  let completed = 0;
+  const failedOperations: FileMoveOperation[] = [];
+  const failureMessages: string[] = [];
+  managementBusy = true;
+  managementError = false;
+  managementMessage = `Menyiapkan upload 0 / ${operations.length} file ke WebDAV…`;
+  renderFileManagement();
+
+  try {
+    for (const operation of operations) {
+      try {
+        const path = `${operation.destinationDirectory}/${operation.destinationName}`;
+        const source = await readFileAtPath(managementRoot, path);
+        await uploader.upload(path, source);
+        completed += 1;
+        managementMessage = `Mengunggah ${completed} / ${operations.length}: ${operation.destinationName}`;
+      } catch (error) {
+        failedOperations.push(operation);
+        failureMessages.push(`${operation.destinationName}: ${error instanceof Error ? error.message : "Upload gagal."}`);
+        managementMessage = `Upload diproses: ${completed} berhasil, ${failedOperations.length} gagal…`;
+      }
+      renderFileManagement();
+    }
+    managementUploadOperations = failedOperations;
+    managementError = failedOperations.length > 0;
+    managementMessage = failedOperations.length > 0
+      ? `${completed} file berhasil diunggah; ${failedOperations.length} gagal. ${failureMessages[0]}`
+      : `${completed} file berhasil diunggah ke WebDAV. File lokal tidak diubah.`;
+  } finally {
+    managementBusy = false;
+    renderFileManagement();
+  }
 }
 
 type DirectoryPickerWindow = Window & {
@@ -271,6 +326,7 @@ async function selectManagementFolder(): Promise<void> {
   try {
     managementRoot = await picker.call(window, { id: "queryflow-tim34", mode: "readwrite" });
     managementPlan = null;
+    managementUploadOperations = [];
     managementError = false;
     managementMessage = "Folder dipilih. Klik Pindai & Preview; tahap ini belum mengubah file.";
   } catch (error) {
@@ -293,6 +349,7 @@ async function previewFileManagement(): Promise<void> {
   }
   managementBusy = true;
   managementPlan = null;
+  managementUploadOperations = [];
   managementError = false;
   managementMessage = "Memindai struktur folder dan file Excel…";
   renderFileManagement();
@@ -337,12 +394,19 @@ async function executeManagement(): Promise<void> {
         : `Memindahkan 0 / ${total} file…`;
       renderFileManagement();
     });
+    const uploadOperationsByPath = new Map(
+      managementUploadOperations.map((operation) => [`${operation.destinationDirectory}/${operation.destinationName}`, operation]),
+    );
+    for (const operation of result.completedOperations) {
+      uploadOperationsByPath.set(`${operation.destinationDirectory}/${operation.destinationName}`, operation);
+    }
+    managementUploadOperations = [...uploadOperationsByPath.values()];
     const snapshotAfter = await scanDirectory(managementRoot);
     managementPlan = buildFileManagementPlan(snapshotAfter, managementDateInput.value);
     managementError = result.failures.length > 0;
     managementMessage = result.failures.length > 0
-      ? `${result.completed} file selesai; ${result.failures.length} gagal dan sumbernya dipertahankan. ${result.failures[0]?.operation.sourcePath}: ${result.failures[0]?.message}`
-      : `${result.completed} file berhasil dipindahkan dengan aman.`;
+      ? `${result.completed} file siap diunggah; ${result.failures.length} gagal dan sumbernya dipertahankan. ${result.failures[0]?.operation.sourcePath}: ${result.failures[0]?.message}`
+      : `${result.completed} file berhasil dipindahkan dengan aman dan siap diunggah ke WebDAV.`;
   } catch (error) {
     managementError = true;
     managementMessage = error instanceof Error ? error.message : "Rencana gagal dijalankan.";
@@ -1086,9 +1150,11 @@ importButton.addEventListener("click", () => folderInput.click());
 folderInput.addEventListener("change", () => void importRepositoryFolder(folderInput.files));
 selectManagementFolderButton.addEventListener("click", () => void selectManagementFolder());
 previewManagementButton.addEventListener("click", () => void previewFileManagement());
+uploadManagementButton.addEventListener("click", () => void uploadManagement());
 executeManagementButton.addEventListener("click", () => void executeManagement());
 managementDateInput.addEventListener("change", () => {
   managementPlan = null;
+  managementUploadOperations = [];
   managementError = false;
   managementMessage = managementRoot
     ? "Tanggal berubah. Pindai ulang untuk membuat preview baru."

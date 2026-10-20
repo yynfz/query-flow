@@ -86,11 +86,14 @@ Bagian **Kelola File Excel Tim 34** di side panel mengubah skrip Terminal pada r
 
 1. Pilih tanggal output dan folder induk `Tim 34`.
 2. Klik **Pindai & Preview** untuk melihat folder yang akan dibuat, file yang akan dipindahkan, penyesuaian nama, file yang dilewati, dan temuan `_partial`.
-3. Periksa preview, lalu klik **Jalankan Rencana** dan konfirmasi.
+3. Periksa preview, lalu klik **Jalankan Rencana** dan konfirmasi untuk mendistribusikan file ke folder lokal kabupaten/kota.
+4. Setelah distribusi lokal selesai, klik **Unggah ke WebDAV**. QueryFlow menampilkan preview jumlah file dan path tujuan WebDAV; upload baru dimulai setelah Anda mengonfirmasi preview tersebut. Hasil dari setiap folder lokal `KabKota/{tanggal}` dikirim ke direktori WebDAV dengan struktur yang sama. Login ke Transdata Cloud di Chrome terlebih dahulu; file remote yang sudah ada tidak ditimpa.
 
 File `.xlsx` di dalam folder tanggal didistribusikan menurut kode kabupaten/kota 4 digit pada nama file. Nama yang bentrok diberi akhiran `_2`, `_3`, dan seterusnya, tanpa menimpa file yang sudah ada. Output RantabDBNAS diberi nama deskriptif jika folder sumber menunjukkan query yang dikenali. File dari folder run generik tetap dipindahkan dengan nama aslinya agar tidak salah label.
 
 Saat menjalankan rencana, QueryFlow menyalin file ke tujuan dan memverifikasi ukurannya sebelum menghapus sumber. Jika struktur folder berubah setelah preview, operasi terkait dihentikan dan pengguna diminta memindai ulang.
+
+Upload WebDAV hanya aktif untuk file yang berhasil dipindahkan oleh **Jalankan Rencana**. Jika sebagian upload gagal, percobaan berikutnya hanya mengulang file yang gagal.
 
 ## Instalasi untuk Development
 
@@ -112,6 +115,11 @@ Di Chrome, buka `chrome://extensions`, aktifkan **Developer mode**, pilih **Load
 - Versi ini ditujukan untuk FASIH SQL Lab. Perubahan pada aplikasi FASIH/Superset dapat memengaruhi kompatibilitas.
 
 ## Changelog
+
+### 0.5.0
+
+- Tambah upload satu-klik dari preview Kelola File Excel Tim 34 ke WebDAV Transdata Cloud.
+- Pertahankan struktur folder hasil preview, buat folder remote yang belum ada, dan cegah overwrite file remote.
 
 ### 0.4.1
 

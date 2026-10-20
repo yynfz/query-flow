@@ -11,6 +11,7 @@ export interface FileExecutionFailure {
 
 export interface FileExecutionResult {
   completed: number;
+  completedOperations: FileMoveOperation[];
   failures: FileExecutionFailure[];
 }
 
@@ -32,6 +33,10 @@ async function getSource(root: FileSystemDirectoryHandle, path: string): Promise
   if (!name) throw new Error(`Path sumber tidak valid: ${path}`);
   const parent = parts.length > 0 ? await getDirectory(root, parts.join("/"), false) : root;
   return { parent, handle: await parent.getFileHandle(name) };
+}
+
+export async function readFileAtPath(root: FileSystemDirectoryHandle, path: string): Promise<File> {
+  return (await getSource(root, path)).handle.getFile();
 }
 
 async function entryExists(directory: FileSystemDirectoryHandle, name: string): Promise<boolean> {
@@ -74,6 +79,7 @@ export async function executeFileManagementPlan(
   for (const path of plan.dateDirectories) await getDirectory(root, path, true);
 
   let completed = 0;
+  const completedOperations: FileMoveOperation[] = [];
   const failures: FileExecutionFailure[] = [];
   onProgress?.(0, plan.operations.length);
 
@@ -100,6 +106,7 @@ export async function executeFileManagementPlan(
       await source.parent.removeEntry(source.handle.name);
       sourceRemoved = true;
       completed += 1;
+      completedOperations.push(operation);
       try {
         onProgress?.(completed, plan.operations.length, operation);
       } catch {
@@ -112,6 +119,6 @@ export async function executeFileManagementPlan(
       failures.push({ operation, message: error instanceof Error ? error.message : "Pemindahan gagal." });
     }
   }
-  return { completed, failures };
+  return { completed, completedOperations, failures };
 }
 
